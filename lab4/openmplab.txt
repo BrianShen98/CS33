@@ -1,0 +1,201 @@
+1.Download
+
+I unzip the tgz file using
+tar -xzvf openmplab.tgz
+
+2.Profiling
+I use
+make seq GPROF=1
+./seq
+gprof seq
+
+The output shows:
+
+Flat profile:
+
+Each sample counts as 0.01 seconds.
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls  ms/call  ms/call  name    
+ 68.32      0.73     0.73       15    48.73    51.27  func1
+ 18.72      0.93     0.20  5177344     0.00     0.00  rand2
+  4.68      0.98     0.05   491520     0.00     0.00  findIndexBin
+  1.87      1.00     0.02       15     1.34     4.67  func5
+  1.87      1.02     0.02        2    10.01    10.01  init
+  1.87      1.04     0.02        1    20.03   182.27  addSeed
+  0.94      1.05     0.01       15     0.67     0.67  func2
+  0.94      1.06     0.01        1    10.01    10.01  imdilateDisk
+  0.94      1.07     0.01                             sequence
+  0.00      1.07     0.00   983042     0.00     0.00  round
+  0.00      1.07     0.00       16     0.00     0.00  dilateMatrix
+  0.00      1.07     0.00       15     0.00     0.00  func3
+  0.00      1.07     0.00       15     0.00     0.00  func4
+  0.00      1.07     0.00       15     0.00     0.00  rand1
+  0.00      1.07     0.00        2     0.00     0.00  get_time
+  0.00      1.07     0.00        1     0.00     0.00  elapsed_time
+  0.00      1.07     0.00        1     0.00     0.00  fillMatrix
+  0.00      1.07     0.00        1     0.00     0.00  func0
+  0.00      1.07     0.00        1     0.00     0.00  getNeighbors
+
+So it seems that func1 and func5 takes cost much time and I need to focus
+more on optimize these two functions. And then optimize func2.
+
+
+3.Optimization
+These are all the optimization I've done.
+
+func0:
+	#pragma omp parallel for to parallelize the for loop.
+	
+	pull 1/((double)(n)) out of the loop.
+
+func1:
+	#pragma omp parappel for to parallelize for loops.	
+
+	pull out round(...) function so that the program calls the round()
+	function for each iteration of i rather than for each j.
+	
+	pull out the conversion from int Ones to double from loops so that
+	it only perform once.
+
+	put the value of i*Ones into a local variable since the value need to
+	be used multiple times whthin each iteration of i.
+
+	use a local accumulator to perform calculation and put the final result
+	into possibility[i] instead of reference and update possibility[i]
+	within each iteration of j.
+
+func2:
+	#pragma omp parallel for to parallelize for loops.
+	
+	merge the first two for loops
+
+	use a temp variable to perform instruction-level parallelism
+	so that the program can update sumWeights and weights[i] at same time.
+
+func3: 
+       #pragma omp parallel for reduction(...) to parallelize the for loop.
+
+func4:
+	#pragma omp parallel for to parallelize the for loop
+	
+	pull out the conversion from in n to double from loops so that it only
+	perform once.
+
+func5:
+	#pragma omp parallel for to parallelize for loops.	
+
+	pull out the conversion from in n to double from loops so that it only 
+	perform once.
+
+
+
+4. Check
+After done all the optimization, I use make check to check the corretness:
+
+gcc -o omp  -O3 -fopenmp func.c main.c filter.c util.c -lm
+cp omp filter
+./filter
+FUNC TIME : 0.047273
+TOTAL TIME : 1.980949
+diff --brief correct.txt output.txt
+
+The diff --brief correct.txt output.txt command did not output any difference.
+
+And then check memory leak:
+
+make omp MTRACE=1
+./omp
+make checkmem
+
+The output is:
+
+mtrace filter mtrace.out || true
+
+Memory not freed:
+-----------------
+           Address     Size     Caller
+0x0000000001c6c090   0x2040  at 0x7f1059a39869
+0x0000000001c6e0e0     0xc0  at 0x7f1059a39869
+0x0000000001c6e1b0    0x108  at 0x7f1059a398b9
+0x0000000001c6e2c0    0x240  at 0x7f1059f69c25
+0x0000000001c6e510    0x240  at 0x7f1059f69c25
+0x0000000001c6e760    0x240  at 0x7f1059f69c25
+0x0000000001c6e9b0    0x240  at 0x7f1059f69c25
+0x0000000001c6ec00    0x240  at 0x7f1059f69c25
+0x0000000001c6ee50    0x240  at 0x7f1059f69c25
+0x0000000001c6f0a0    0x240  at 0x7f1059f69c25
+0x0000000001c6f2f0    0x240  at 0x7f1059f69c25
+0x0000000001c6f540    0x240  at 0x7f1059f69c25
+0x0000000001c6f790    0x240  at 0x7f1059f69c25
+0x0000000001c6f9e0    0x240  at 0x7f1059f69c25
+0x0000000001c6fc30    0x240  at 0x7f1059f69c25
+0x0000000001c6fe80    0x240  at 0x7f1059f69c25
+0x0000000001c700d0    0x240  at 0x7f1059f69c25
+0x0000000001c70320    0x240  at 0x7f1059f69c25
+0x0000000001c70570    0x240  at 0x7f1059f69c25
+0x0000000001c707c0    0x240  at 0x7f1059f69c25
+0x0000000001c70a10    0x240  at 0x7f1059f69c25
+0x0000000001c70c60    0x240  at 0x7f1059f69c25
+0x0000000001c70eb0    0x240  at 0x7f1059f69c25
+0x0000000001c71100    0x240  at 0x7f1059f69c25
+0x0000000001c71350    0x240  at 0x7f1059f69c25
+0x0000000001c715a0    0x240  at 0x7f1059f69c25
+0x0000000001c717f0    0x240  at 0x7f1059f69c25
+0x0000000001c71a40    0x240  at 0x7f1059f69c25
+0x0000000001c71c90    0x240  at 0x7f1059f69c25
+0x0000000001c71ee0    0x240  at 0x7f1059f69c25
+0x0000000001c72130    0x240  at 0x7f1059f69c25
+0x0000000001c72380    0x240  at 0x7f1059f69c25
+0x0000000001c725d0    0x240  at 0x7f1059f69c25
+0x0000000001c72820    0x240  at 0x7f1059f69c25
+
+But according to piazza, this should be the problem of openMP itself, not due
+to the program. And I did not manually allocate any memory myself. So there
+should be no memory leak.
+
+
+
+5.Speedup
+I put the original func.c into a file called original.c and compile and run it using:
+
+make clean
+make omp SRC=original.c
+./omp
+
+The output is:
+
+FUNC TIME : 0.743257
+TOTAL TIME : 2.605859
+
+Then I compile and run the optimized version of func.c"
+
+make clean
+make omp
+./omp
+
+The output is:
+
+FUNC TIME : 0.041701
+TOTAL TIME : 1.952982
+
+Since the speedup is calculated by 
+
+S_p = T_1 /T_p
+
+So the Speedup is 0.743 / 0.0417 = 17.81, much larger than 3.5.
+
+I tested the speeup multiple times. It seems to vary somewhat.
+
+e.g.
+One result is:
+
+original:
+FUNC TIME : 0.469798
+TOTAL TIME : 2.077371
+
+func:
+FUNC TIME : 0.039973
+TOTAL TIME : 1.871615
+
+Speedup = 0.4698 / 0.0399 = 11.77
+

@@ -1,0 +1,93 @@
+only O2 option:
+
+testovf:
+.LFB0:
+        .cfi_startproc
+        xorl    %eax, %eax
+        ret
+        .cfi_endproc
+.LFE0:
+        .size   testovf, .-testovf
+        .ident  "GCC: (GNU) 6.3.0"
+        .section        .note.GNU-stack,"",@progbits
+
+
+
+with only O2 option, gcc just makes %rax zero by using xor and return 0. The reason for this implementation is that without flag for wrapping around, or sanity check, gcc can do whatever it wants when overflow occurs. In this case, it decide to ignore the case of overflowing and consider n + 9223372036854775807 always greater than n. 
+
+
+O2 and fwrapv option:
+
+testovf:
+.LFB0:
+        .cfi_startproc
+        movabsq $9223372036854775807, %rax
+        addq    %rdi, %rax
+        cmpq    %rax, %rdi
+        setg    %al
+        ret
+        .cfi_endproc
+.LFE0:
+        .size   testovf, .-testovf
+        .ident  "GCC: (GNU) 6.3.0"
+        .section        .note.GNU-stack,"",@progbits
+
+
+
+gcc adds n and the constant together and compares the result with n. And then it returns the result of the comparison. Since -fwrapv option will wrap around the integer when overflow occurs, gcc's implementation of directly adding n and constant together makes sence.
+
+
+O2 and -fsanitize=undefined option:
+
+testovf:
+.LFB0:
+        .cfi_startproc
+        pushq   %rbp
+        .cfi_def_cfa_offset 16
+        .cfi_offset 6, -16
+        pushq   %rbx
+        .cfi_def_cfa_offset 24
+        .cfi_offset 3, -24
+        movabsq $9223372036854775807, %rdx
+        movq    %rdi, %rbp
+        movq    %rdi, %rbx
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 32
+        addq    %rdx, %rbp
+        jo      .L6
+.L2:
+        cmpq    %rbp, %rbx
+        setg    %al
+        addq    $8, %rsp
+        .cfi_remember_state
+        .cfi_def_cfa_offset 24
+        popq    %rbx
+        .cfi_def_cfa_offset 16
+        popq    %rbp
+        .cfi_def_cfa_offset 8
+        ret
+.L6:
+        .cfi_restore_state
+        movq    %rdi, %rsi
+        movl    $.Lubsan_data0, %edi
+        call    __ubsan_handle_add_overflow
+        jmp     .L2
+        .cfi_endproc
+.LFE0:
+		.size   testovf, .-testovf
+        .section        .rodata.str1.1,"aMS",@progbits,1
+.LC0:
+        .string "ovf.c"
+        .data
+        .align 16
+        .type   .Lubsan_data0, @object
+        .size   .Lubsan_data0, 24
+.Lubsan_data0:
+        ......
+
+
+gcc puts the constant into %rdx and n into %rbp. Then it adds the two together and check if the OF flag is set. If OF is set, it will jump to
+.L6 and call __ubsan_handle_add_overflow to handle the overflow. I think it will then output message indicating that overflow occurs.If the operation does not cause overflow, gcc will compare the two values normally in .L2 and return the result.  This behavior makes sense since the option 
+-fsanitize=undefined uses undefinedBehaviorSanitizer, which can check many behaviors including signed overflow. So when it dectets that the OF flag is set, it will call the function to handle overflow and report a warning to overflow situation.
+
+

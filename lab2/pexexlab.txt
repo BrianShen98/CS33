@@ -1,0 +1,25 @@
+1.Gather instruction traces
+
+I first used gdb ~eggert/bin64/bin/emacs-25.2 to run gdb,
+and then I set a break point with "break Ftimes" since Ftimes is the function
+we need to trace. In order to see the assembly code and machine instruction, I used "set disassemble-next-line on". Then gdb can output lines like this:
+
+0x000000000054792c <arith_driver+348>:       5b      pop    %rbx
+
+Then I use r -Q -batch -eval '(print (* 1250284240 -1844255039))' to run emacs. After the program stops at the first breakpoint, I used "stepi" to move to next instruction and use "info 
+registers $<register name>" to see the change of registers and use "x/gx expression" to check the change made to memory. (Note: g option in x/gx can
+check 8 byte in memory at a time. If just using "x" it will only output 4 byte at a time.
+
+-----------------------------------------------------------------------------
+2.Examine integer overflow handling
+
+I use gcc -S -O2 -fwrapv ovf.c 
+	  gcc -S -O2 ovf.c
+	  gcc -S -O2 -fsanitize=undefined ovf.c
+
+	  to generate these three assembly-language files. And compare them accordingly.
+
+
+3. A few more question
+The answer and steps are thoroughly discussed in answer.txt.
+

